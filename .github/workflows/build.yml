@@ -1,5 +1,9 @@
 name: build
 on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
@@ -23,6 +27,7 @@ jobs:
       with:
         submodules: 'recursive'
         fetch-depth: 0
+
     - name: Install Dependencies
       shell: bash
       run: |
@@ -31,6 +36,7 @@ jobs:
           libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
           libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
           libfontconfig1-dev xvfb dpkg-dev
+
     - name: Install Skia
       if: ${{ matrix.ui == 'gui' }}
       shell: bash
@@ -40,11 +46,14 @@ jobs:
         skia_file=$(basename $skia_url)
         curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
         unzip "$skia_file" -d skia
+
     - name: ccache
       uses: hendrikmuhs/ccache-action@v1.2.23
       with:
         key: ${{ matrix.os }}-${{ matrix.ui }}-${{ matrix.scripting }}-${{ matrix.build_type }}
+
     - uses: aseprite/get-ninja@main
+
     - name: Generating Makefiles
       shell: bash
       run: |
@@ -72,15 +81,18 @@ jobs:
           -DLAF_BACKEND=$laf_backend \
           -DSKIA_DIR=$(realpath skia) \
           -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+
     - name: Compiling
       shell: bash
       run: |
         cd build && ninja
+
     - name: Running C++ Tests
       shell: bash
       run: |
         export XVFB=xvfb-run
         cd build && $XVFB ctest --output-on-failure
+
     - name: Running CLI Tests
       if: ${{ matrix.scripting == 'lua' }}
       shell: bash
@@ -116,9 +128,30 @@ jobs:
 
         dpkg-deb --build --root-owner-group "$PKG" "${PKG}.deb"
 
-    - name: Upload .deb
+        # Exponer el nombre del .deb para los pasos siguientes
+        echo "DEB_FILE=${PKG}.deb" >> $GITHUB_ENV
+
+    - name: Upload .deb (Artifact)
       if: ${{ matrix.build_type == 'RelWithDebInfo' && matrix.ui == 'gui' && matrix.scripting == 'lua' }}
       uses: actions/upload-artifact@v4
       with:
         name: aseprite-deb
         path: aseprite_*.deb
+        retention-days: 30
+
+    - name: Subir .deb a GitHub Release
+      if: ${{ matrix.build_type == 'RelWithDebInfo' && matrix.ui == 'gui' && matrix.scripting == 'lua' && github.event_name != 'pull_request' }}
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ github.run_number }}
+        name: "Aseprite build #${{ github.run_number }}"
+        body: |
+          Paquete `.deb` generado automáticamente desde el workflow.
+
+          - Commit: `${{ github.sha }}`
+          - Rama: `${{ github.ref_name }}`
+          - Ejecución: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        files: ${{ env.DEB_FILE }}
+        fail_on_unmatched_files: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
